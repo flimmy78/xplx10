@@ -311,6 +311,7 @@ static void shutdownHandler(int onSignal)
 
 static void sendX10Command(void *buf, size_t count)
 {
+	debug_hexdump(DEBUG_EXPECTED, buf, count, "X10 transmit packet: ");
 	if(!dryRun){
 		if(!x10_write_message(myX10, buf, count))
 			debug(DEBUG_UNEXPECTED, "X10 transmission error");
@@ -331,13 +332,16 @@ static void sendX10Command(void *buf, size_t count)
 
 static void processX10BasicCommand(xPL_MessagePtr theMessage)
 {
-	int cmd,i,cnt,pktx;
+	int cmd,i,j,cnt,pktx;
 	unsigned char hc;
-	unsigned char x10_pkt[42];
+	unsigned char x10_pkt[6];
 	String addrList[16];
 	const String command =  xPL_getMessageNamedValue(theMessage, "command");
 	const String deviceList = xPL_getMessageNamedValue(theMessage, "device");
 	const String houseList = xPL_getMessageNamedValue(theMessage, "house");
+	const String level =  xPL_getMessageNamedValue(theMessage, "level");
+	const String data1 = xPL_getMessageNamedValue(theMessage, "data1");
+	const String data2 = xPL_getMessageNamedValue(theMessage, "data2");
 	
 	if(!theMessage){
 		debug(DEBUG_UNEXPECTED, "No message passed in");
@@ -368,79 +372,114 @@ static void processX10BasicCommand(xPL_MessagePtr theMessage)
 		}
 	    debug(DEBUG_ACTION, "Command index : %d", cmd);
 		pktx = 0;
+		x10_pkt[pktx++] = HEADER_DEFAULT | HEADER_FUNCTION;
+		x10_pkt[pktx] = (hc << 4);
+			
 		switch(cmd){
 			case CMD_SEL: /* Select */
 				if(!deviceList){
 					debug(DEBUG_UNEXPECTED, "Device list not present");
 					return;
 				}
-
-
+				/* Split the address list */
 				cnt = dupOrSplitString(deviceList, addrList, ',', 16);
 				debug(DEBUG_ACTION, "Number of devices: %d", cnt);
-				
-				/* Build device address X10 packet */
-				if(cnt){
-					x10_pkt[pktx++] = HEADER_DEFAULT;
-				}
-				else{
+			
+				/* Must have at least 1 address */
+				if(!cnt){
 					debug(DEBUG_UNEXPECTED, "No devices specified");
 					free(addrList[0]);
 					return;
-				}	
-				for(i = 0; pktx < 42 && i < cnt; i++){
+				}
+				/* Send an X10 transmission for each address */	
+				for(i = 0; pktx < 6 && i < cnt; i++){
+					/* Build the address packet */
+					pktx = 0;
+					x10_pkt[pktx++] = HEADER_DEFAULT;
 					if(x10_number_to_devicecode(atoi(addrList[i]),x10_pkt + pktx)){
-						debug(DEBUG_UNEXPECTED,"Bad device code: %s",addrList[i]);
-						free(addrList[0]);
-						return;
+						debug(DEBUG_UNEXPECTED,"Bad device code: %s. Skipped.",addrList[i]);
+						continue;
 					}
 					/* Or in the house code bits */
-					x10_pkt[pktx++] |= (hc << 4);		
+					x10_pkt[pktx++] |= (hc << 4);	
+					sendX10Command(x10_pkt, pktx);	
 				}
-				free(addrList[0]); /* Done with address list */
-				
-				debug_hexdump(DEBUG_EXPECTED, x10_pkt, pktx, "X10 transmit select packet: ");
-				
-				sendX10Command(x10_pkt, pktx);
-				
+				free(addrList[0]); /* Done with address list */						
 				break;
 				
 			case CMD_AUO: /* All units off */
+				x10_pkt[pktx++] = COMMAND_ALL_UNITS_OFF;
+				sendX10Command(x10_pkt, pktx);	
 				break;
 				
 			case CMD_ALO: /* All lights on */
 			case CMD_ALF: /* All lights off */
+				x10_pkt[pktx++] |= (cmd == CMD_ALO) ? COMMAND_ALL_LIGHTS_ON : COMMAND_ALL_LIGHTS_OFF;			
+				sendX10Command(x10_pkt, pktx);
 				break;
 				
 			case CMD_ON: /* On */
 			case CMD_OFF: /* Off */
-				x10_pkt[pktx++] = HEADER_DEFAULT | HEADER_FUNCTION;
-				x10_pkt[pktx] = (hc << 4);
-				x10_pkt[pktx++] |= (cmd == CMD_ON) ? COMMAND_ON : COMMAND_OFF;
-				
-				debug_hexdump(DEBUG_EXPECTED, x10_pkt, pktx, "X10 transmit on/off packet: ");
-				
+				x10_pkt[pktx++] |= (cmd == CMD_ON) ? COMMAND_ON : COMMAND_OFF;			
 				sendX10Command(x10_pkt, pktx);
-				
 				break;
 				
 			case CMD_DIM: /* Dim */
 			case CMD_BRI: /* Bright */
+				if(!level){
+					debug(DEBUG_UNEXPECTED, "No level n/v");
+					return;
+				}
+				i = atoi(level);
+				if((i < 0) || (i > 100)){
+					debug(DEBUG_UNEXPECTED, "Dim/Bright level out of bounds");
+					return;
+				}
+				x10_pkt[0] |= (i << 3);
+				x10_pkt[pktx++] |= (cmd == CMD_DIM) ? COMMAND_DIM : COMMAND_BRIGHT;			
+				sendX10Command(x10_pkt, pktx);
 				break;
 				
 			case CMD_EXT: /* Extended */
+				if(!data1 || !data2){
+					debug(DEBUG_UNEXPECTED, "data1 or data2 n/v missing");
+					return;
+				}
+				i = atoi(data1);
+				j = atoi(data2);
+				if((i < 0) || (i > 255)){
+					debug(DEBUG_UNEXPECTED, "data1 out of bounds");
+					return;
+				}
+				if((j < 0) || (j > 255)){
+					debug(DEBUG_UNEXPECTED, "data2 out of bounds");
+					return;
+				}
+				x10_pkt[0] |= HEADER_EXTENDED;
+				x10_pkt[pktx++] |= COMMAND_EXTENDED_CODE;
+				x10_pkt[pktx++] = (unsigned char) i; /* Data 1 */
+				x10_pkt[pktx++] = (unsigned char) j; /* Data 2 */
+				sendX10Command(x10_pkt, pktx);
 				break;
 				
 			case CMD_HRQ: /* Hail Request */
+				x10_pkt[pktx++] = COMMAND_HAIL_REQUEST;
+				sendX10Command(x10_pkt, pktx);	
 				break;
 				
 			case CMD_PD1: /* Pre dim 1 */
+				x10_pkt[pktx++] = COMMAND_PRESET_DIM1;
+				sendX10Command(x10_pkt, pktx);	
 				break;
 				
 			case CMD_PD2: /* Pre dim 2 */
+				x10_pkt[pktx++] = COMMAND_PRESET_DIM2;
+				sendX10Command(x10_pkt, pktx);	
 				break;
 				
 			case CMD_STS: /* Status */
+				x10_pkt[pktx++] = COMMAND_STATUS_REQUEST;
+				sendX10Command(x10_pkt, pktx);	
 				break;
 			
 			default:
