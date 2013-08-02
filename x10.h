@@ -118,16 +118,20 @@ struct x10 {
 	int fd;
 	int housecode;
 	int address_buffer_count;
+	void (*event_callback)(const char *address_list, const char houseletter, const unsigned commandcode);
 	unsigned char address_buffer_housecode;
 	char address_buffer[16];
+	char address_string[64];
 };
 
 /* Prototypes. */
 
-X10 *x10_open(char *x10_tty_name);
+X10 *x10_open(const char *x10_tty_name, void (*event_callback)(const char *, const char, const unsigned));
 int x10_write_message(X10 *x10, void *buf, size_t count);
 void x10_read_event(X10 *x10);
 int x10_letter_to_housecode(char houseletter, unsigned char *housecode);
 int x10_number_to_devicecode(int devicenum, unsigned char *devicecode);
+int x10_fd(X10 *x10);
+int x10_close(X10 *x10);
 
 #endif

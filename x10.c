@@ -79,6 +79,12 @@ static unsigned char deviceCodes[16] =
 	DEVICECODE_16
 };
 
+static const int addresscode2int[16] = 
+	{13,5,3,11,15,7,1,9,14,6,4,12,16,8,2,10};
+	
+	
+static const char housecode2letter[17] = "MECKOGAINFDLPHBJ";
+
 
 /* 
  * Wait for the x10 hardware to provide us with some data.
@@ -322,8 +328,7 @@ static void x10_poll(X10 *x10) {
 	unsigned char command;
 	unsigned char buffer_size;
 	unsigned char function_byte;
-	char string_buffer[256];
-	int i;
+	int i,j,pos;
 	
 	/* Acknowledge the x10's poll. */
 	command=0xc3;
@@ -365,11 +370,8 @@ static void x10_poll(X10 *x10) {
 	}
 	
 	/* Print packet info to debug. */
-	sprintf(string_buffer, "X10 packet> size: %i, function %02x, data:", buffer_size, function_byte);
-	for(i=0; i < buffer_size - 1; i++) {
-		sprintf(string_buffer + strlen(string_buffer), " %02x", x10_buffer[i]);
-	}
-	debug(DEBUG_STATUS, string_buffer);
+	debug_hexdump(DEBUG_STATUS, x10_buffer, buffer_size - 1,"X10 packet size: %d, function mask: %02x\n Packet contents: ",
+	buffer_size, function_byte);
 	
 	/* Decode the packet. */
 	for(i=0; i < buffer_size - 1; i++) {
@@ -383,54 +385,28 @@ static void x10_poll(X10 *x10) {
 			 */
 			if((x10_buffer[i] >> 4) != x10->address_buffer_housecode) {
 				debug(DEBUG_EXPECTED, "Function housecode and address housecode mismatch.");
-				x10->address_buffer_count=0;
+				x10->address_buffer_count = 0;
 			}
+	
 			
-			/* Package the event. */
-#if(0) /* FIXME */
-			event.command=x10_buffer[i] & 0x0f;
-			event.housecode=x10_buffer[i] >> 4;
-			event.devices=address_buffer_count;
-			event.time=time(NULL);
-			for(j=0; j < address_buffer_count; j++) {
-				event.device[j]=address_buffer[j];
-			}
-			
-			/* Was it a function that needs an extra byte? */
-			if(event.command == COMMAND_DIM || event.command == COMMAND_BRIGHT) {
-				
-				/* We'd better have an extra byte. */
-				if((i + 1) >= (buffer_size - 1)) {
-					debug(DEBUG_UNEXPECTED, "Missing extra byte of function.");
-					continue;
+			/* Addresses in buffer, and user handler installed? */
+			if(x10->address_buffer_count && x10->event_callback){
+				/* Translate the data */
+				//debug(DEBUG_ACTION,"Address count: %i\n", x10->address_buffer_count);
+				/* Generate the address string */		
+				for(j = 0, pos = 0 ; j < x10->address_buffer_count; j++){
+					if(j)
+						x10->address_string[pos++] = ',';
+				    //debug(DEBUG_ACTION,"Address code: %02X\n", x10->address_buffer[j]);
+					pos += snprintf(x10->address_string + pos, 3, "%u", addresscode2int[x10->address_buffer[j] & 0x0F]);
 				}
-				
-				/* Save the extra byte and advance 1. */
-				event.extended1=x10_buffer[++i];
-				function_byte=function_byte >> 1;
+				//debug(DEBUG_ACTION,"Address string: %s\n", x10->address_string);
+				//debug(DEBUG_ACTION,"House code: %02X\n", x10->address_buffer_housecode);	 
+				/* Call the user event handler */
+				(*x10->event_callback)(x10->address_string,
+				housecode2letter[x10->address_buffer_housecode], x10_buffer[i] & 0x0F);
 			}
 			
-			/* Was it a function that needs two extra bytes? */
-			else if(event.command == COMMAND_EXTENDED_DATA_TRANSFER) {
-				
-				/* We'd better have two extra bytes. */
-				if((i + 2) >= (buffer_size - 1)) {
-					debug(DEBUG_UNEXPECTED, "Missing extra 2 bytes of function.");
-					continue;
-				}
-				
-				/* Save the extra bytes and advance 2. */
-				event.extended1=x10_buffer[++i];
-				event.extended2=x10_buffer[++i];
-				function_byte=function_byte >> 2;
-			}
-			
-			/* Send the event to all monitoring clients. */
-			monitor_broadcast(&event, sizeof(Event));
-			
-			/* Take action on this event. */
-			event_action(&event);
-#endif			
 			/* Flush the address buffer. */
 			x10->address_buffer_count=0;
 		}
@@ -592,11 +568,12 @@ int x10_write_message(X10 *x10, void *buf, size_t count) {
 /* 
  * Open the x10 device. 
  *
- * Description of how to do the serial handling came from some mini serial
- * port programming howto.
+ * Pass in the TTY name, and an optional callback function for read events.
+ * If the callback isn't used, pass in NULL
+ * 
  */
  
-X10 *x10_open(char *x10_tty_name) {
+X10 *x10_open(const char *x10_tty_name, void (*event_callback)(const char *, const char, const unsigned)) {
 	X10 *x10;
 	struct termios termios;
 	
@@ -654,6 +631,7 @@ X10 *x10_open(char *x10_tty_name) {
 	if(tcsetattr(x10->fd, TCSANOW, &termios) != 0) {
 		fatal("Could not set tty attributes.");
 	}
+	x10->event_callback = event_callback;
 	x10->magic = X10_MAGIC;
 	return(x10);
 }
@@ -745,6 +723,31 @@ int x10_number_to_devicecode(int devicenum, unsigned char *devicecode)
 }
 
 
+/*
+ * Return file descriptor if open
+ */
+int x10_fd(X10 *x10)
+{
+	if((x10) && (x10->magic == X10_MAGIC))
+		return x10->fd;
+	else
+		return -1;
+}
 
-
+/*
+ * Close the X10 communications port
+ */
+ 
+int x10_close(X10 *x10)
+{
+	int res;
+	if((x10) && (x10->magic == X10_MAGIC)){
+		res = close(x10->fd);
+		x10->magic = 0;
+		free(x10);
+		return res;		
+	}
+	else
+		return 0;
+}
 

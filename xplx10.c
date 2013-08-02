@@ -1,6 +1,6 @@
 /*
 *    
-*    Copyright (C) 2012  Stephen A. Rodgers
+*    Copyright (C) 2013  Stephen A. Rodgers
 *
 *    This program is free software: you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -25,6 +25,8 @@
 #ifndef VERSION
 	#define VERSION "X.X.X"
 #endif
+
+#define DEBUG
 
 #ifndef EMAIL
 	#define EMAIL "hwstar@rodgers.sdcoxmail.com"
@@ -51,10 +53,17 @@
 
 #define WS_SIZE 256
 
-//#define DEF_PID_FILE		"/var/run/xplx10.pid"
-#define DEF_PID_FILE		"./xplx10.pid"
-//#define DEF_CONFIG_FILE		"/etc/xplx10.conf"
+#ifndef DEBUG
+#define DEF_PID_FILE		"/var/run/xplx10.pid"
+#define DEF_CONFIG_FILE		"/etc/xplx10.conf"
+#else
 #define DEF_CONFIG_FILE		"./xplx10.conf"
+#define DEF_PID_FILE		"./xplx10.pid"
+#endif
+
+#define	DEF_TTY				"/dev/ttyS0"
+#define DEF_INTERFACE		"eth0"
+
 #define DEF_INSTANCE_ID		"cm11a"
 
  
@@ -102,9 +111,9 @@ static xPL_MessagePtr xplx10TriggerMessage = NULL;
 static ConfigEntryPtr_t	configEntry = NULL;
 
 static char configFile[WS_SIZE] = DEF_CONFIG_FILE;
-static char interface[WS_SIZE] = "";
+static char interface[WS_SIZE] = DEF_INTERFACE;
 static char logPath[WS_SIZE] = "";
-static char tty[WS_SIZE] = "";
+static char tty[WS_SIZE] = DEF_TTY;
 static char instanceID[WS_SIZE] = DEF_INSTANCE_ID;
 static char pidFile[WS_SIZE] = DEF_PID_FILE;
 static X10 *myX10 = NULL;
@@ -127,16 +136,7 @@ static struct option longOptions[] = {
 	{0, 0, 0, 0}
 };
 
-/* 
- * Allocate a memory block and zero it out
- */
 
-static void *mallocz(size_t size)
-{
-	void *m = calloc(size, 1);
-	return m;
-}
- 
 /*
  * Malloc error handler
  */
@@ -144,25 +144,6 @@ static void *mallocz(size_t size)
 static void malloc_error(String file, int line)
 {
 	fatal("Out of memory in file %s, at line %d");
-}
-
-
-/*
-* Convert a string to an unsigned int with bounds checking
-*/
-
-static Bool str2uns(String s, unsigned *num, unsigned min, unsigned max)
-{
-		long val;
-		if((!num) || (!s)){
-			debug(DEBUG_UNEXPECTED, "NULL pointer passed to str2uns");
-			return FALSE;
-		}
-		val = strtol(s, NULL, 0);
-		if((val < min) || (val > max))
-			return FALSE;
-		*num = (unsigned) val;
-		return TRUE;
 }
 
 
@@ -270,23 +251,6 @@ static int pid_write(char *filename, pid_t pid) {
 	return 0;
 }
 
-/*
-* Change string to upper case
-* Warning: String must be nul terminated.
-*/
-
-static String str2Upper(char *q)
-{
-	char *p;
-	
-	if(!q)
-		return NULL;
-			
-	if(q){
-		for (p = q; *p; ++p) *p = toupper(*p);
-	}
-	return q;
-}
 
 /*
 * When the user hits ^C, logically shutdown
@@ -298,6 +262,7 @@ static void shutdownHandler(int onSignal)
 	xPL_setServiceEnabled(xplx10Service, FALSE);
 	xPL_releaseService(xplx10Service);
 	xPL_shutdown();
+	x10_close(myX10);
 	/* Unlink the pid file if we can. */
 	(void) unlink(pidFile);
 	exit(0);
@@ -538,6 +503,29 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 
 }
 
+/*
+* X10 I/O handler (Callback from xPL)
+*/
+
+static void x10Handler(int fd, int revents, int userValue)
+{
+	debug(DEBUG_ACTION,"X10 Read I/O pending");
+	x10_read_event(myX10);
+	return;
+}
+
+/*
+ * Our X10 event handler
+ */
+ 
+static void myX10EventHandler(const char *address_string, const char housecode, const unsigned commandindex)
+{
+	debug(DEBUG_ACTION,"X10 event received. Command: %u, house code: %c, addresses: %s", commandindex, housecode, address_string);
+}
+
+ 
+ 
+ 
 
 /*
 * Show help
@@ -569,6 +557,37 @@ void showHelp(void)
 
 }
 
+/*
+* Default error handler for confreadScan()
+*/
+
+static void confDefErrorHandler( int etype, int linenum, String info)
+{
+	switch(etype){
+
+		case CRE_MALLOC:
+			error("Memory allocation error in confread.c, line %d", linenum);
+			break;
+
+		case CRE_SYNTAX:
+			error("Syntax error in config file on line: %d", linenum);
+			break;
+
+		case CRE_IO:
+			error("I/O error in confead.c: %s", info);
+			break;
+
+		case CRE_FOPEN:
+			break;
+
+		default:
+			error("Unknown error code: %d", etype);
+			break;
+
+	}
+
+
+}
 
 /*
 * main
@@ -580,7 +599,7 @@ int main(int argc, char *argv[])
 	int longindex;
 	int optchar;
 	String p;
-
+	
 		
 
 	/* Set the program name */
@@ -691,47 +710,47 @@ int main(int argc, char *argv[])
 
 	/* Attempt to read a config file */
 	
-	if(!(configEntry = confreadScan(configFile, NULL)))
-		fatal("xplx10.conf file missing (required). Looked here: %s", configFile);
-
-			
-	/* Instance ID */
-	if((!clOverride.instance_id) && (p = confreadValueBySectKey(configEntry, "general", "instance-id")))
-		confreadStringCopy(instanceID, p, sizeof(instanceID));
+	if((configEntry = confreadScan(configFile, confDefErrorHandler))){
+		debug(DEBUG_ACTION,"Using config file: %s", configFile);
+		/* Instance ID */
+		if((!clOverride.instance_id) && (p = confreadValueBySectKey(configEntry, "general", "instance-id")))
+			confreadStringCopy(instanceID, p, sizeof(instanceID));
 		
-	/* Interface */
-	if((!clOverride.interface) && (p = confreadValueBySectKey(configEntry, "general", "interface")))
-		confreadStringCopy(interface, p, sizeof(interface));
+		/* Interface */
+		if((!clOverride.interface) && (p = confreadValueBySectKey(configEntry, "general", "interface")))
+			confreadStringCopy(interface, p, sizeof(interface));
 			
-	/* pid file */
-	if((!clOverride.pid_file) && (p = confreadValueBySectKey(configEntry, "general", "pid-file")))
-		confreadStringCopy(pidFile, p, sizeof(pidFile));	
+		/* pid file */
+		if((!clOverride.pid_file) && (p = confreadValueBySectKey(configEntry, "general", "pid-file")))
+			confreadStringCopy(pidFile, p, sizeof(pidFile));	
 						
-	/* log path */
-	if((!clOverride.log_path) && (p = confreadValueBySectKey(configEntry, "general", "log-path")))
-		confreadStringCopy(logPath, p, sizeof(logPath));
+		/* log path */
+		if((!clOverride.log_path) && (p = confreadValueBySectKey(configEntry, "general", "log-path")))
+			confreadStringCopy(logPath, p, sizeof(logPath));
 		
-	/* tty */
-	if((!clOverride.tty) && (p = confreadValueBySectKey(configEntry, "general", "tty")))
-		confreadStringCopy(tty, p, sizeof(tty));			
+		/* tty */
+		if((!clOverride.tty) && (p = confreadValueBySectKey(configEntry, "general", "tty")))
+			confreadStringCopy(tty, p, sizeof(tty));			
+	}
+	else
+		debug(DEBUG_UNEXPECTED, "Config file %s not found or not readable", configFile);
 
 	/* Turn on library debugging for level 5 */
 	if(debugLvl >= 5)
 		xPL_setDebugging(TRUE);
-
-  	/* Make sure we are not already running (.pid file check). */
-	if(pid_read(pidFile) != -1) {
-		fatal("%s is already running", progName);
-	}
-	
-	/* Fork into the background. */
-
+		
+	/* Fork into the background. */	
 	if(!noBackground) {
 		int retval;
+		
+	    /* Make sure we are not already running (.pid file check). */
+		if(pid_read(pidFile) != -1) 
+			fatal("%s is already running", progName);
+			
 		debug(DEBUG_STATUS, "Forking into background");
 
     	/* 
-		* If debugging is enabled, and we are daemonized, redirect the debug output to a log file if
+		* If debugging is enabled, redirect the debug output to a log file if
     	* the path to the logfile is defined
 		*/
 
@@ -747,7 +766,7 @@ int main(int argc, char *argv[])
 			else
 				fatal_with_reason(errno, "parent fork");
     		}
-
+	
 
 
 		/*
@@ -788,8 +807,8 @@ int main(int argc, char *argv[])
 		close(0);
 		close(1);
 		close(2);
-		} 
-
+ 
+	}
 	debug(DEBUG_STATUS,"Initializing xPL library");
 	
 	/* Set the xPL interface */
@@ -831,16 +850,19 @@ int main(int argc, char *argv[])
  	/* Enable the service */
   	xPL_setServiceEnabled(xplx10Service, TRUE);
 
-	if(pid_write(pidFile, getpid()) != 0) {
+	if(!noBackground && (pid_write(pidFile, getpid()) != 0)) {
 		debug(DEBUG_UNEXPECTED, "Could not write pid file '%s'.", pidFile);
 	}
 
 	debug(DEBUG_STATUS,"Initializing x10 communications on tty: %s", tty);
 	
 	if(!dryRun){
-		myX10 = x10_open(tty);
+		myX10 = x10_open(tty, myX10EventHandler);
 		if(!myX10)
 			fatal("Could not initialize X10 communications on tty: %s", tty);
+			/* Ask xPL to monitor our serial fd */
+		if(!xPL_addIODevice(x10Handler, 1234, x10_fd(myX10), TRUE, FALSE, FALSE))
+			fatal("Could not register x10 fd with xPL");
 	}
 
  	/** Main Loop **/
