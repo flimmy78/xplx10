@@ -389,11 +389,12 @@ static void x10_poll(X10 *x10) {
 			}
 	
 			
-			/* Addresses in buffer, and user handler installed? */
-			if(x10->address_buffer_count && x10->event_callback){
+			/* User handler installed? */
+			if(x10->event_callback){
 				/* Translate the data */
 				//debug(DEBUG_ACTION,"Address count: %i\n", x10->address_buffer_count);
-				/* Generate the address string */		
+				/* Generate the address string */
+				x10->address_string[0] = 0;		
 				for(j = 0, pos = 0 ; j < x10->address_buffer_count; j++){
 					if(j)
 						x10->address_string[pos++] = ',';

@@ -49,7 +49,7 @@
 
 #define MALLOC_ERROR	malloc_error(__FILE__,__LINE__)
 
-#define SHORT_OPTIONS "c:d:f:hi:l:np:s:vy"
+#define SHORT_OPTIONS "c:d:f:hi:l:no:p:s:vy"
 
 #define WS_SIZE 256
 
@@ -65,6 +65,8 @@
 #define DEF_INTERFACE		"eth0"
 
 #define DEF_INSTANCE_ID		"cm11a"
+
+#define DEF_HOUSE_LETTER	'A'
 
  
 typedef struct cloverrides {
@@ -108,6 +110,7 @@ static clOverride_t clOverride = {0,0,0,0};
 
 static xPL_ServicePtr xplx10Service = NULL;
 static xPL_MessagePtr xplx10TriggerMessage = NULL;
+static xPL_MessagePtr xplx10ConfirmMessage = NULL;
 static ConfigEntryPtr_t	configEntry = NULL;
 
 static char configFile[WS_SIZE] = DEF_CONFIG_FILE;
@@ -116,6 +119,7 @@ static char logPath[WS_SIZE] = "";
 static char tty[WS_SIZE] = DEF_TTY;
 static char instanceID[WS_SIZE] = DEF_INSTANCE_ID;
 static char pidFile[WS_SIZE] = DEF_PID_FILE;
+static char defaultHouseLetter = DEF_HOUSE_LETTER;
 static X10 *myX10 = NULL;
 
 
@@ -128,6 +132,7 @@ static struct option longOptions[] = {
 	{"help", 0, 0, 'h'},
 	{"interface", 1, 0, 'i'},	
 	{"instance", 1, 0, 's'},
+	{"house",1,0,'o'},
 	{"tty", 1, 0, 'p'},	
 	{"log", 1, 0, 'l'},
 	{"no-background", 0, 0, 'n'},
@@ -298,6 +303,7 @@ static void sendX10Command(void *buf, size_t count)
 static void processX10BasicCommand(xPL_MessagePtr theMessage)
 {
 	int cmd,i,j,cnt,pktx;
+	char houseLetter[2];
 	unsigned char hc;
 	unsigned char x10_pkt[6];
 	String addrList[16];
@@ -319,147 +325,156 @@ static void processX10BasicCommand(xPL_MessagePtr theMessage)
 		return;
 	}
 	
-	if(!houseList){
-		debug(DEBUG_UNEXPECTED, "House list not present");
+	houseLetter[1] = 0;
+	if(houseList){ /* If house letter overridden */
+		if(strlen(houseList) != 1 || x10_letter_to_housecode((houseLetter[0] = houseList[0]), &hc)){
+			debug(DEBUG_UNEXPECTED, "Bad house code %s", houseList);
+			return;
+		}
+	}
+	else{ /* Use default house letter */
+		debug(DEBUG_EXPECTED,"Using default house letter: %c", (houseLetter[0] = defaultHouseLetter));
+		if(x10_letter_to_housecode(defaultHouseLetter, &hc)){
+			debug(DEBUG_UNEXPECTED, "Bad default house letter");
+			return;
+		}
+	}		
+	if(!deviceList){
+		debug(DEBUG_UNEXPECTED, "Device list not present");
 		return;
 	}
-	
-	if(strlen(houseList) != 1 || x10_letter_to_housecode(houseList[0], &hc)){
-		debug(DEBUG_UNEXPECTED, "Bad house code %s", houseList);
+	/* Split the address list */
+	cnt = dupOrSplitString(deviceList, addrList, ',', 16);
+	debug(DEBUG_ACTION, "Number of devices: %d", cnt);
+			
+	/* Must have at least 1 address */
+	if(!cnt){
+		debug(DEBUG_UNEXPECTED, "No devices specified");
+		free(addrList[0]);
 		return;
-	}	
-	
-	else{
-		debug(DEBUG_ACTION, "Received command: %s", command);
-		for(cmd = 0; X10_commands[cmd]; cmd++){
-			if(!strcmp(command, X10_commands[cmd]))
-				break;
-		}
-	    debug(DEBUG_ACTION, "Command index : %d", cmd);
+	}
+		
+	/* Send an X10 transmission for each address */	
+	for(i = 0; pktx < 6 && i < cnt; i++){
+		/* Build the address packet */
 		pktx = 0;
-		x10_pkt[pktx++] = HEADER_DEFAULT | HEADER_FUNCTION;
-		x10_pkt[pktx] = (hc << 4);
-			
-		switch(cmd){
-			case CMD_SEL: /* Select */
-				if(!deviceList){
-					debug(DEBUG_UNEXPECTED, "Device list not present");
-					return;
-				}
-				/* Split the address list */
-				cnt = dupOrSplitString(deviceList, addrList, ',', 16);
-				debug(DEBUG_ACTION, "Number of devices: %d", cnt);
-			
-				/* Must have at least 1 address */
-				if(!cnt){
-					debug(DEBUG_UNEXPECTED, "No devices specified");
-					free(addrList[0]);
-					return;
-				}
-				/* Send an X10 transmission for each address */	
-				for(i = 0; pktx < 6 && i < cnt; i++){
-					/* Build the address packet */
-					pktx = 0;
-					x10_pkt[pktx++] = HEADER_DEFAULT;
-					if(x10_number_to_devicecode(atoi(addrList[i]),x10_pkt + pktx)){
-						debug(DEBUG_UNEXPECTED,"Bad device code: %s. Skipped.",addrList[i]);
-						continue;
-					}
-					/* Or in the house code bits */
-					x10_pkt[pktx++] |= (hc << 4);	
-					sendX10Command(x10_pkt, pktx);	
-				}
-				free(addrList[0]); /* Done with address list */						
-				break;
-				
-			case CMD_AUO: /* All units off */
-				x10_pkt[pktx++] = COMMAND_ALL_UNITS_OFF;
-				sendX10Command(x10_pkt, pktx);	
-				break;
-				
-			case CMD_ALO: /* All lights on */
-			case CMD_ALF: /* All lights off */
-				x10_pkt[pktx++] |= (cmd == CMD_ALO) ? COMMAND_ALL_LIGHTS_ON : COMMAND_ALL_LIGHTS_OFF;			
-				sendX10Command(x10_pkt, pktx);
-				break;
-				
-			case CMD_ON: /* On */
-			case CMD_OFF: /* Off */
-				x10_pkt[pktx++] |= (cmd == CMD_ON) ? COMMAND_ON : COMMAND_OFF;			
-				sendX10Command(x10_pkt, pktx);
-				break;
-				
-			case CMD_DIM: /* Dim */
-			case CMD_BRI: /* Bright */
-				if(!level){
-					debug(DEBUG_UNEXPECTED, "No level n/v");
-					return;
-				}
-				i = atoi(level);
-				if((i < 0) || (i > 100)){
-					debug(DEBUG_UNEXPECTED, "Dim/Bright level out of bounds");
-					return;
-				}
-				x10_pkt[0] |= (i << 3);
-				x10_pkt[pktx++] |= (cmd == CMD_DIM) ? COMMAND_DIM : COMMAND_BRIGHT;			
-				sendX10Command(x10_pkt, pktx);
-				break;
-				
-			case CMD_EXT: /* Extended */
-				if(!data1 || !data2){
-					debug(DEBUG_UNEXPECTED, "data1 or data2 n/v missing");
-					return;
-				}
-				i = atoi(data1);
-				j = atoi(data2);
-				if((i < 0) || (i > 255)){
-					debug(DEBUG_UNEXPECTED, "data1 out of bounds");
-					return;
-				}
-				if((j < 0) || (j > 255)){
-					debug(DEBUG_UNEXPECTED, "data2 out of bounds");
-					return;
-				}
-				x10_pkt[0] |= HEADER_EXTENDED;
-				x10_pkt[pktx++] |= COMMAND_EXTENDED_CODE;
-				x10_pkt[pktx++] = (unsigned char) i; /* Data 1 */
-				x10_pkt[pktx++] = (unsigned char) j; /* Data 2 */
-				sendX10Command(x10_pkt, pktx);
-				break;
-				
-			case CMD_HRQ: /* Hail Request */
-				x10_pkt[pktx++] = COMMAND_HAIL_REQUEST;
-				sendX10Command(x10_pkt, pktx);	
-				break;
-				
-			case CMD_PD1: /* Pre dim 1 */
-				x10_pkt[pktx++] = COMMAND_PRESET_DIM1;
-				sendX10Command(x10_pkt, pktx);	
-				break;
-				
-			case CMD_PD2: /* Pre dim 2 */
-				x10_pkt[pktx++] = COMMAND_PRESET_DIM2;
-				sendX10Command(x10_pkt, pktx);	
-				break;
-				
-			case CMD_STS: /* Status */
-				x10_pkt[pktx++] = COMMAND_STATUS_REQUEST;
-				sendX10Command(x10_pkt, pktx);	
-				break;
-			
-			default:
-				debug(DEBUG_UNEXPECTED,"Bad command");
-				break;	
+		x10_pkt[pktx++] = HEADER_DEFAULT;
+		if(x10_number_to_devicecode(atoi(addrList[i]),x10_pkt + pktx)){
+			debug(DEBUG_UNEXPECTED,"Bad device code: %s. Skipped.",addrList[i]);
+			continue;
 		}
-		/* Always send  a trigger message */
-		xPL_clearMessageNamedValues(xplx10TriggerMessage);
-		xPL_setMessageNamedValue(xplx10TriggerMessage, "command", command);
-		xPL_setMessageNamedValue(xplx10TriggerMessage, "house", houseList);
-		if(deviceList)
-			xPL_setMessageNamedValue(xplx10TriggerMessage, "device", deviceList); 
-		if(!xPL_sendMessage(xplx10TriggerMessage))
-			debug(DEBUG_UNEXPECTED, "Command complete trigger message transmission failed");		
+		/* Or in the house code bits */
+		x10_pkt[pktx++] |= (hc << 4);	
+		sendX10Command(x10_pkt, pktx);	
 	}
+	free(addrList[0]); /* Done with address list */			
+
+	debug(DEBUG_ACTION, "Received command: %s", command);
+	
+	/* Decode command */
+	for(cmd = 0; X10_commands[cmd]; cmd++){
+		if(!strcmp(command, X10_commands[cmd]))
+			break;
+	}
+    debug(DEBUG_ACTION, "Command index : %d", cmd);
+    
+   /* Build header byte */
+	pktx = 0;
+	x10_pkt[pktx++] = HEADER_DEFAULT | HEADER_FUNCTION;
+	x10_pkt[pktx] = (hc << 4);
+
+    /* Dispatch to command */
+	switch(cmd){
+		case CMD_SEL: /* Select */			
+			break;
+				
+		case CMD_AUO: /* All units off */
+			x10_pkt[pktx++] = COMMAND_ALL_UNITS_OFF;
+			sendX10Command(x10_pkt, pktx);	
+			break;
+				
+		case CMD_ALO: /* All lights on */
+		case CMD_ALF: /* All lights off */
+			x10_pkt[pktx++] |= (cmd == CMD_ALO) ? COMMAND_ALL_LIGHTS_ON : COMMAND_ALL_LIGHTS_OFF;			
+			sendX10Command(x10_pkt, pktx);
+			break;
+				
+		case CMD_ON: /* On */
+		case CMD_OFF: /* Off */
+			x10_pkt[pktx++] |= (cmd == CMD_ON) ? COMMAND_ON : COMMAND_OFF;			
+			sendX10Command(x10_pkt, pktx);
+			break;
+				
+		case CMD_DIM: /* Dim */
+		case CMD_BRI: /* Bright */
+			if(!level){
+				debug(DEBUG_UNEXPECTED, "No level n/v");
+				return;
+			}
+			i = atoi(level);
+			if((i < 0) || (i > 100)){
+				debug(DEBUG_UNEXPECTED, "Dim/Bright level out of bounds");
+				return;
+			}
+			x10_pkt[0] |= (i << 3);
+			x10_pkt[pktx++] |= (cmd == CMD_DIM) ? COMMAND_DIM : COMMAND_BRIGHT;			
+			sendX10Command(x10_pkt, pktx);
+			break;
+				
+		case CMD_EXT: /* Extended */
+			if(!data1 || !data2){
+				debug(DEBUG_UNEXPECTED, "data1 or data2 n/v missing");
+				return;
+			}
+			i = atoi(data1);
+			j = atoi(data2);
+			if((i < 0) || (i > 255)){
+				debug(DEBUG_UNEXPECTED, "data1 out of bounds");
+				return;
+			}
+			if((j < 0) || (j > 255)){
+				debug(DEBUG_UNEXPECTED, "data2 out of bounds");
+				return;
+			}
+			x10_pkt[0] |= HEADER_EXTENDED;
+			x10_pkt[pktx++] |= COMMAND_EXTENDED_CODE;
+			x10_pkt[pktx++] = (unsigned char) i; /* Data 1 */
+			x10_pkt[pktx++] = (unsigned char) j; /* Data 2 */
+			sendX10Command(x10_pkt, pktx);
+			break;
+				
+		case CMD_HRQ: /* Hail Request */
+			x10_pkt[pktx++] = COMMAND_HAIL_REQUEST;
+			sendX10Command(x10_pkt, pktx);	
+			break;
+				
+		case CMD_PD1: /* Pre dim 1 */
+			x10_pkt[pktx++] = COMMAND_PRESET_DIM1;
+			sendX10Command(x10_pkt, pktx);	
+			break;
+				
+		case CMD_PD2: /* Pre dim 2 */
+			x10_pkt[pktx++] = COMMAND_PRESET_DIM2;
+			sendX10Command(x10_pkt, pktx);	
+			break;
+				
+		case CMD_STS: /* Status */
+			x10_pkt[pktx++] = COMMAND_STATUS_REQUEST;
+			sendX10Command(x10_pkt, pktx);	
+			break;
+			
+		default:
+			debug(DEBUG_UNEXPECTED,"Bad command");
+			break;	
+	}
+	/* Always send  a confirm message */
+	xPL_clearMessageNamedValues(xplx10ConfirmMessage);
+	xPL_setMessageNamedValue(xplx10ConfirmMessage, "command", command);
+	xPL_setMessageNamedValue(xplx10ConfirmMessage, "house", houseLetter);
+	if(deviceList)
+		xPL_setMessageNamedValue(xplx10ConfirmMessage, "device", deviceList); 
+	if(!xPL_sendMessage(xplx10ConfirmMessage))
+		debug(DEBUG_UNEXPECTED, "Command complete confirm message transmission failed");		
 }
 
 
@@ -520,7 +535,93 @@ static void x10Handler(int fd, int revents, int userValue)
  
 static void myX10EventHandler(const char *address_string, const char housecode, const unsigned commandindex)
 {
+	char *command;
+	char houseletter[2];
+	
+	
 	debug(DEBUG_ACTION,"X10 event received. Command: %u, house code: %c, addresses: %s", commandindex, housecode, address_string);
+	
+	houseletter[0] = housecode;
+	houseletter[1] = 0;
+	
+	xPL_clearMessageNamedValues(xplx10TriggerMessage);
+	
+	switch(commandindex){
+		case COMMAND_ALL_UNITS_OFF:
+			command = "all_units_off";
+			break;
+			
+		case COMMAND_ALL_LIGHTS_OFF:
+			command = "all_lights_off";
+			break;
+			
+		case COMMAND_ALL_LIGHTS_ON:
+			command = "all_lights_on";
+			break;
+			
+		case COMMAND_BRIGHT:
+			command = "bright";
+			break;
+			
+		case COMMAND_DIM:
+			command = "dim";
+			break;
+			
+		case COMMAND_EXTENDED_CODE:
+			command = "extended_code";
+			break;
+			
+		case COMMAND_EXTENDED_DATA_TRANSFER:
+			command = "extended";
+			break;
+			
+		case COMMAND_HAIL_ACKNOWLEDGE:
+			command = "hail_ack"; 
+			break;
+			
+		case COMMAND_HAIL_REQUEST:
+			command = "hail_request";
+			break;
+			
+		case COMMAND_OFF:
+			command = "off";
+			break;
+			
+		case COMMAND_ON:
+			command = "on";
+			break;
+			
+		case COMMAND_PRESET_DIM1:
+			command = "predim1";
+			break;
+			
+		case COMMAND_PRESET_DIM2:
+			command = "predim2";
+			break;
+			
+		case COMMAND_STATUS_OFF:
+			command = "status_off";
+			break;
+			
+		case COMMAND_STATUS_ON:
+			command = "status_on";
+			break;
+			
+		case COMMAND_STATUS_REQUEST:
+			command = "status";
+			break;
+			
+		default:
+				debug(DEBUG_UNEXPECTED, "Invalid command code received: %02X", commandindex);
+				return;
+	}
+	xPL_setMessageNamedValue(xplx10TriggerMessage, "command", command);
+	xPL_setMessageNamedValue(xplx10TriggerMessage, "house", houseletter);
+	if(address_string && strlen(address_string))
+		xPL_setMessageNamedValue(xplx10TriggerMessage, "device", (const String) address_string); 
+	if(!xPL_sendMessage(xplx10TriggerMessage))
+		debug(DEBUG_UNEXPECTED, "Command complete trigger message transmission failed");		
+	
 }
 
  
@@ -547,6 +648,7 @@ void showHelp(void)
 	printf("  -i, --interface NAME    Set the broadcast interface (e.g. eth0)\n");
 	printf("  -l, --log  PATH         Path name to debug log file when daemonized\n");
 	printf("  -n, --no-background     Do not fork into the background (useful for debugging)\n");
+	printf("  -o, --house HOUSELETTER Set default house code\n");
 	printf("  -p, --tty               TTY port");
 	printf("  -s, --instance ID       Set instance id. Default is %s", instanceID);
 	printf("  -v, --version           Display program version\n");
@@ -598,6 +700,7 @@ int main(int argc, char *argv[])
 {
 	int longindex;
 	int optchar;
+	unsigned char hc;
 	String p;
 	
 		
@@ -676,8 +779,16 @@ int main(int argc, char *argv[])
 				confreadStringCopy(tty, optarg, sizeof(tty));
 				clOverride.tty = 1;
 				break;	
+			
+			case 'o': /* house ? */
+				if(x10_letter_to_housecode(optarg[0], &hc))
+					fatal("Bad house code on command line");
+				defaultHouseLetter = optarg[0];
+				clOverride.houseletter = 1;
+				break;			
 					
-			case 's':
+					
+			case 's': /* Instance ID */
 				confreadStringCopy(instanceID, optarg, WS_SIZE);
 				clOverride.instance_id = 1;
 				debug(DEBUG_ACTION,"New instance ID is: %s", instanceID);
@@ -730,7 +841,14 @@ int main(int argc, char *argv[])
 		
 		/* tty */
 		if((!clOverride.tty) && (p = confreadValueBySectKey(configEntry, "general", "tty")))
-			confreadStringCopy(tty, p, sizeof(tty));			
+			confreadStringCopy(tty, p, sizeof(tty));	
+			
+		/* house letter */
+		if((!clOverride.houseletter) && (p = confreadValueBySectKey(configEntry, "general", "house"))){
+			if(x10_letter_to_housecode(p[0], &hc))
+					fatal("Bad house code in config file");
+			defaultHouseLetter = p[0];
+		}				
 	}
 	else
 		debug(DEBUG_UNEXPECTED, "Config file %s not found or not readable", configFile);
@@ -827,12 +945,14 @@ int main(int argc, char *argv[])
 
   
 	/*
-	* Create trigger message object
+	* Create trigger message objecta
 	*/
+
+	xplx10ConfirmMessage = xPL_createBroadcastMessage(xplx10Service, xPL_MESSAGE_TRIGGER);
+	xPL_setSchema(xplx10ConfirmMessage, "x10", "confirm");
 
 	xplx10TriggerMessage = xPL_createBroadcastMessage(xplx10Service, xPL_MESSAGE_TRIGGER);
 	xPL_setSchema(xplx10TriggerMessage, "x10", "basic");
-
 
 
   	/* Install signal traps for proper shutdown */
