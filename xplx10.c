@@ -360,8 +360,9 @@ static void processX10BasicCommand(xPL_MessagePtr theMessage)
 		pktx = 0;
 		x10_pkt[pktx++] = HEADER_DEFAULT;
 		if(x10_number_to_devicecode(atoi(addrList[i]),x10_pkt + pktx)){
-			debug(DEBUG_UNEXPECTED,"Bad device code: %s. Skipped.",addrList[i]);
-			continue;
+			debug(DEBUG_UNEXPECTED,"Bad device code: %s. Command aborted.",addrList[i]);
+			free(addrList[0]); /* Done with address list */	
+			return;
 		}
 		/* Or in the house code bits */
 		x10_pkt[pktx++] |= (hc << 4);	
