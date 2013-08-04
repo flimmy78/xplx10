@@ -26,7 +26,7 @@
 	#define VERSION "X.X.X"
 #endif
 
-#define DEBUG
+//#define DEBUG
 
 #ifndef EMAIL
 	#define EMAIL "hwstar@rodgers.sdcoxmail.com"
